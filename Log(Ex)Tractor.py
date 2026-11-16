@@ -120,19 +120,56 @@ def parse_line(raw: str):
     }
 
 
-def is_key_conversion_message(msg: str) -> bool:
+# Пресеты: какой логгер считать «своим» и какие сообщения — ключевыми.
+#   logger      — значение поля "lg" (галка «Только Logger»)
+#   contains    — подстроки (в нижнем регистре) ключевых сообщений
+#   startswith  — префиксы (в нижнем регистре) ключевых сообщений
+PRESETS = {
+    "Конвертация": {
+        "subtitle": "GenericService / Convertation  •  JSON Lines",
+        "logger": "Logger",
+        "contains": (
+            "запущена постановка в очередь конвертации писем в docx",
+            "найдено писем для постановки в очередь:",
+            "постановка в очередь завершена. всего",
+        ),
+        "startswith": (
+            "convertonemail:",
+        ),
+    },
+    "Заполнение доп. полей": {
+        "subtitle": "Worker / FillMailExtraFields  •  JSON Lines",
+        "logger": "Logger",
+        "contains": (),
+        "startswith": (
+            "заполнение доп. полей:",
+            "fillonemailextrafields:",
+        ),
+    },
+}
+
+DEFAULT_PRESET = "Конвертация"
+
+
+def is_key_message(msg: str, preset: dict) -> bool:
     """
-    Проверяет, относится ли сообщение к ключевым записям конвертации.
+    Проверяет, относится ли сообщение к ключевым записям пресета.
     """
 
     m = msg.lower()
 
     return (
-        "запущена постановка в очередь конвертации писем в docx" in m
-        or "найдено писем для постановки в очередь:" in m
-        or "постановка в очередь завершена. всего" in m
-        or m.startswith("convertonemail:")
+        any(s in m for s in preset["contains"])
+        or m.startswith(tuple(preset["startswith"]))
     )
+
+
+def is_key_conversion_message(msg: str) -> bool:
+    """
+    Проверяет, относится ли сообщение к ключевым записям конвертации.
+    """
+
+    return is_key_message(msg, PRESETS["Конвертация"])
 
 
 def sort_log_files(paths: list[str]) -> list[str]:
@@ -172,8 +209,12 @@ def extract_logs(
     date_to: datetime,
     levels: set,
     only_converter: bool,
-    only_key: bool
+    only_key: bool,
+    preset: dict | None = None
 ) -> list:
+
+    if preset is None:
+        preset = PRESETS[DEFAULT_PRESET]
 
     results = []
 
@@ -198,10 +239,10 @@ def extract_logs(
                 if entry["level"] not in levels:
                     continue
 
-                if only_converter and entry["logger"] != "Logger":
+                if only_converter and entry["logger"] != preset["logger"]:
                     continue
 
-                if only_key and not is_key_conversion_message(entry["message"]):
+                if only_key and not is_key_message(entry["message"], preset):
                     continue
 
                 if date_from <= entry["ts"] <= date_to:
@@ -232,7 +273,7 @@ class LogExtractorApp(tk.Tk):
 
         super().__init__()
 
-        self.title("Log Extractor — Convertation")
+        self.title(f"Log Extractor — {DEFAULT_PRESET}")
         self.geometry("1300x600")
         self.minsize(850, 500)
 
@@ -244,6 +285,8 @@ class LogExtractorApp(tk.Tk):
         self.file_paths: list[str] = []
 
         self._build_ui()
+
+        self._setup_clipboard_bindings()
 
 
     def _build_ui(self):
@@ -267,13 +310,40 @@ class LogExtractorApp(tk.Tk):
             fg="#e94560"
         ).pack(side="left", padx=16)
 
+        self.subtitle_var = tk.StringVar(
+            value=PRESETS[DEFAULT_PRESET]["subtitle"]
+        )
+
         tk.Label(
             header,
-            text="GenericService / Convertation  •  JSON Lines",
+            textvariable=self.subtitle_var,
             font=("Courier New", 10),
             bg="#16213e",
             fg="#7a8ba0"
         ).pack(side="left")
+
+        # выбор пресета
+        self.preset_var = tk.StringVar(value=DEFAULT_PRESET)
+
+        preset_cb = ttk.Combobox(
+            header,
+            textvariable=self.preset_var,
+            values=list(PRESETS),
+            state="readonly",
+            width=24,
+            font=("Courier New", 9)
+        )
+
+        preset_cb.pack(side="right", padx=16)
+        preset_cb.bind("<<ComboboxSelected>>", self._on_preset_change)
+
+        tk.Label(
+            header,
+            text="Пресет:",
+            font=("Courier New", 9),
+            bg="#16213e",
+            fg="#7a8ba0"
+        ).pack(side="right")
 
         # controls
         ctrl = tk.Frame(
@@ -441,7 +511,7 @@ class LogExtractorApp(tk.Tk):
 
         tk.Checkbutton(
             row3,
-            text="Только конвертация",
+            text="Только Logger",
             variable=self.only_conv_var,
             font=("Courier New", 9),
             bg="#1a1a2e",
@@ -688,6 +758,124 @@ class LogExtractorApp(tk.Tk):
             width=w
         )
 
+    def _on_preset_change(self, _event=None):
+
+        name = self.preset_var.get()
+
+        self.subtitle_var.set(PRESETS[name]["subtitle"])
+        self.title(f"Log Extractor — {name}")
+        self.status_var.set(
+            f"Пресет: {name}. Нажмите «Извлечь»."
+        )
+
+    # ── буфер обмена для полей ввода ──────────────────────────
+
+    # Ctrl+<буква> в нерусской раскладке Tk не распознаёт (keysym
+    # приходит как Cyrillic_em и т.п.), поэтому сопоставляем вручную.
+    _CYR_KEYSYMS = {
+        "Cyrillic_em": "<<Paste>>",   # V
+        "Cyrillic_es": "<<Copy>>",    # C
+        "Cyrillic_che": "<<Cut>>",    # X
+        "Cyrillic_ef": "<<SelectAll>>",  # A
+    }
+
+    # физические коды клавиш V / C / X / A
+    _KEYCODES = {
+        "win32": {86: "<<Paste>>", 67: "<<Copy>>",
+                  88: "<<Cut>>", 65: "<<SelectAll>>"},
+        "x11": {55: "<<Paste>>", 54: "<<Copy>>",
+                53: "<<Cut>>", 38: "<<SelectAll>>"},
+    }
+
+    def _setup_clipboard_bindings(self):
+
+        self.bind_class("Entry", "<<Paste>>", self._entry_paste)
+        self.bind_class("Entry", "<<SelectAll>>", self._entry_select_all)
+        self.bind_class("Entry", "<Control-KeyPress>", self._entry_ctrl_key, add="+")
+        self.bind_class("Entry", "<Button-3>", self._entry_menu)
+
+        self._entry_ctx = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#16213e",
+            fg="#c8d8e8",
+            activebackground="#1a4a7a"
+        )
+
+        for label, ev in (
+            ("Вырезать", "<<Cut>>"),
+            ("Копировать", "<<Copy>>"),
+            ("Вставить", "<<Paste>>"),
+            ("Выделить всё", "<<SelectAll>>"),
+        ):
+            self._entry_ctx.add_command(
+                label=label,
+                command=lambda ev=ev: self._entry_ctx_target.event_generate(ev)
+            )
+
+        self._entry_ctx.add_separator()
+        self._entry_ctx.add_command(
+            label="Очистить",
+            command=lambda: self._entry_ctx_target.delete(0, "end")
+        )
+
+        self._entry_ctx_target = None
+
+    def _entry_ctrl_key(self, event):
+
+        if event.keysym.isascii() and len(event.keysym) == 1:
+            # латинская раскладка — стандартные биндинги Tk уже сработали
+            return None
+
+        virtual = self._CYR_KEYSYMS.get(event.keysym)
+
+        if virtual is None:
+            ws = self.tk.call("tk", "windowingsystem")
+            virtual = self._KEYCODES.get(ws, {}).get(event.keycode)
+
+        if virtual:
+            event.widget.event_generate(virtual)
+            return "break"
+
+        return None
+
+    def _entry_paste(self, event):
+
+        w = event.widget
+
+        try:
+            text = w.clipboard_get()
+        except tk.TclError:
+            return "break"
+
+        # однострочное поле: переводы строк превращаем в пробелы
+        text = " ".join(text.splitlines()).strip()
+
+        try:
+            w.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+
+        w.insert("insert", text)
+        w.xview_moveto(1.0)
+
+        return "break"
+
+    def _entry_select_all(self, event):
+
+        event.widget.selection_range(0, "end")
+        event.widget.icursor("end")
+
+        return "break"
+
+    def _entry_menu(self, event):
+
+        self._entry_ctx_target = event.widget
+        event.widget.focus_set()
+        self._entry_ctx.tk_popup(event.x_root, event.y_root)
+
+        return "break"
+
     def _browse_file(self):
 
         paths = filedialog.askopenfilenames(
@@ -813,7 +1001,8 @@ class LogExtractorApp(tk.Tk):
                 dt_to,
                 levels,
                 only_converter=self.only_conv_var.get(),
-                only_key=self.only_key_var.get()
+                only_key=self.only_key_var.get(),
+                preset=PRESETS[self.preset_var.get()]
             )
 
         except Exception as e:
