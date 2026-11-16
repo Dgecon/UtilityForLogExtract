@@ -1,2 +1,4 @@
 output
-venv*.log
+venv
+*.log
+__pycache__/
