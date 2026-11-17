@@ -1,2 +1,4 @@
 output
 venv
+*.log
+__pycache__/
