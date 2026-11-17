@@ -88,6 +88,7 @@ def parse_line(raw: str):
             "level": m.group("level").upper(),
             "message": m.group("message").strip(),
             "logger": lg,
+            "trace": obj.get("tr", ""),
         }
 
     # fallback — внешний timestamp
@@ -117,6 +118,7 @@ def parse_line(raw: str):
         "level": level,
         "message": mt.strip(),
         "logger": lg,
+        "trace": obj.get("tr", ""),
     }
 
 
@@ -252,6 +254,42 @@ def extract_logs(
     results.sort(key=lambda e: e["ts"])
 
     return results
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_text(text: str) -> str:
+    """
+    Приводит текст к виду для поиска: без учёта регистра,
+    ё = е, любые пробельные символы (в т.ч. неразрывные,
+    двойные, табы) схлопываются в один пробел.
+    """
+
+    text = text.casefold().replace("ё", "е")
+
+    return _WS_RE.sub(" ", text).strip()
+
+
+def entry_matches(entry: dict, needle: str) -> bool:
+    """
+    Ищет нормализованную подстроку needle по всей записи:
+    время, уровень, сообщение, логгер, trace id.
+    """
+
+    ts_str = entry["ts"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    haystack = normalize_text(
+        " | ".join((
+            ts_str,
+            entry["level"],
+            entry["message"],
+            entry.get("logger", ""),
+            entry.get("trace", ""),
+        ))
+    )
+
+    return needle in haystack
 
 
 def format_entry(entry: dict) -> str:
@@ -545,11 +583,17 @@ class LogExtractorApp(tk.Tk):
 
         self.filter_var = tk.StringVar()
 
-        self._entry(
+        filter_entry = self._entry(
             row3,
             self.filter_var,
             18
-        ).pack(side="left", padx=(0, 8))
+        )
+
+        filter_entry.pack(side="left", padx=(0, 8))
+
+        # Enter в поле фильтра — запустить извлечение
+        filter_entry.bind("<Return>", lambda e: self._run_extract())
+        filter_entry.bind("<KP_Enter>", lambda e: self._run_extract())
 
         self._btn(
             row3,
@@ -583,6 +627,11 @@ class LogExtractorApp(tk.Tk):
             value="Выберите файл и нажмите «Извлечь»"
         )
 
+        # кнопки копирования сводки выборки (справа в строке статуса)
+        self._btn(sf, "Окончание", self._copy_last_ts).pack(side="right", padx=(3, 8))
+        self._btn(sf, "Кол-во", self._copy_count).pack(side="right", padx=3)
+        self._btn(sf, "Начало", self._copy_first_ts).pack(side="right", padx=3)
+
         tk.Label(
             sf,
             textvariable=self.status_var,
@@ -590,7 +639,7 @@ class LogExtractorApp(tk.Tk):
             bg="#16213e",
             fg="#4caf82",
             anchor="w"
-        ).pack(fill="x", padx=8)
+        ).pack(side="left", fill="x", expand=True, padx=8)
 
         tf = tk.Frame(self, bg="#1a1a2e")
         tf.pack(fill="both", expand=True, padx=PAD, pady=(0, PAD))
@@ -1018,14 +1067,14 @@ class LogExtractorApp(tk.Tk):
 
             return
 
-        flt = self.filter_var.get().strip().lower()
+        flt = normalize_text(self.filter_var.get())
 
         if flt:
 
             entries = [
                 e
                 for e in entries
-                if flt in e["message"].lower()
+                if entry_matches(e, flt)
             ]
 
         self._entries = entries
@@ -1061,6 +1110,11 @@ class LogExtractorApp(tk.Tk):
             f"✔ Найдено: {len(entries)} записей | "
             f"Файлов: {len(self.file_paths)} "
             f"({size_mb:.1f} МБ)"
+            + (
+                "  ⚠ Проверьте даты, пресет и галки «Только …»"
+                if not entries
+                else ""
+            )
         )
 
     def _save_result(self):
@@ -1142,6 +1196,44 @@ class LogExtractorApp(tk.Tk):
             self.clipboard_append(
                 "\n".join(lines)
             )
+
+    def _copy_text(self, text: str, what: str):
+
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+        self.status_var.set(f"📋 Скопировано ({what}): {text}")
+
+    def _copy_summary(self, kind: str):
+
+        if not self._entries:
+
+            messagebox.showinfo(
+                "Нет данных",
+                "Сначала выполните извлечение."
+            )
+
+            return
+
+        if kind == "count":
+            self._copy_text(str(len(self._entries)), "кол-во записей")
+            return
+
+        e = self._entries[0] if kind == "first" else self._entries[-1]
+
+        self._copy_text(
+            e["ts"].strftime("%Y-%m-%d %H:%M:%S"),
+            "начало" if kind == "first" else "окончание"
+        )
+
+    def _copy_first_ts(self):
+        self._copy_summary("first")
+
+    def _copy_last_ts(self):
+        self._copy_summary("last")
+
+    def _copy_count(self):
+        self._copy_summary("count")
 
     def _copy_all(self):
 
