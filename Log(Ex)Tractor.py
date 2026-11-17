@@ -118,10 +118,42 @@ def parse_line(raw: str):
         "level": level,
         "message": mt.strip(),
         "logger": lg,
+        "trace": obj.get("tr", ""),
     }
 
 
-def is_key_conversion_message(msg: str) -> bool:
+# Пресеты: какой логгер считать «своим» и какие сообщения — ключевыми.
+#   logger      — значение поля "lg" (галка «Только Logger»)
+#   contains    — подстроки (в нижнем регистре) ключевых сообщений
+#   startswith  — префиксы (в нижнем регистре) ключевых сообщений
+PRESETS = {
+    "Конвертация": {
+        "subtitle": "GenericService / Convertation  •  JSON Lines",
+        "logger": "Logger",
+        "contains": (
+            "запущена постановка в очередь конвертации писем в docx",
+            "найдено писем для постановки в очередь:",
+            "постановка в очередь завершена. всего",
+        ),
+        "startswith": (
+            "convertonemail:",
+        ),
+    },
+    "Заполнение доп. полей": {
+        "subtitle": "Worker / FillMailExtraFields  •  JSON Lines",
+        "logger": "Logger",
+        "contains": (),
+        "startswith": (
+            "заполнение доп. полей:",
+            "fillonemailextrafields:",
+        ),
+    },
+}
+
+DEFAULT_PRESET = "Конвертация"
+
+
+def is_key_message(msg: str, preset: dict) -> bool:
     """
     Проверяет, относится ли сообщение к ключевым записям пресета.
     """
